@@ -1,4 +1,9 @@
-# Hybrid RAG — Retrieval-Augmented Generation with Dense + Sparse Search
+# Hybrid RAG >> Retrieval-Augmented Generation with Dense + Sparse Search
+
+<p align="center">
+  <img src="assets/tui-demo.png" alt="Hybrid RAG Terminal User Interface" width="100%">
+</p>
+
 
 A self-correcting **Hybrid Retrieval-Augmented Generation** pipeline that combines **FAISS vector search** (semantic understanding) with **BM25 keyword search** (exact matching) to answer questions about your documents — PDFs, DOCX, CSV, Excel, images (OCR), and plain text.
 
@@ -599,10 +604,6 @@ Then open **http://localhost:8501** in your browser.
 ### Option 2: Interactive Terminal CLI
 
 ### Terminal User Interface (TUI)
-
-<p align="center">
-  <img src="assets/tui-demo.png" alt="Hybrid RAG Terminal User Interface" width="100%">
-</p>
 
 The terminal runner (`main.py`) provides an ergonomic, fast, keyboard-first **Terminal User Interface (TUI)** built with Rich:
 
