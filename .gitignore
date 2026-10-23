@@ -15,4 +15,8 @@ wheels/
 # Generated FAISS index (rebuilt from data/)
 faiss_index/
 
+# Test and runtime cache
+.pytest_cache/
+storage/conversations/*.json
+
 data

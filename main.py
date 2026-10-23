@@ -1,85 +1,63 @@
 """
 main.py
 
-End-to-end runner for the Hybrid RAG pipeline, now using the full LangGraph
-flow: load -> chunk -> index -> retrieve -> grade relevance -> generate
-(with automatic query rewrite + retry on poor retrieval).
-
-Run:
-    python main.py
+Primary terminal entrypoint for the Hybrid RAG system.
+Features:
+  - Senior-Product-Designer quality TUI with real-time streaming, command palette,
+    hybrid retrieval telemetry, and source citations.
+  - Sub-second instant startup via pre-built FAISS index & chunk cache.
+  - CLI arguments support:
+      python main.py                  # Launches interactive TUI
+      python main.py --query "..."    # Single-shot fast query in terminal
+      python main.py --telemetry      # Launch TUI with retrieval telemetry enabled
+      python main.py --rebuild        # Force rebuild of FAISS & chunk cache
 """
 
-import os
-import logging
-from dotenv import load_dotenv
+import argparse
+import sys
 
-# Centralized logging — suppress noisy HTTP logs from HuggingFace/httpx
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-for noisy_logger in ("httpx", "httpcore", "urllib3", "huggingface_hub"):
-    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
-from pipeline.data_loader import load_documents
-from pipeline.text_splitter import split_documents
-from pipeline.vectorstore import get_or_build_vectorstore
-from pipeline.search import get_hybrid_retriever
-from pipeline.graph import build_graph, run_query
-
-load_dotenv()
-
-DATA_DIR = os.getenv("DATA_DIR", "./data")
-
-
-def build_pipeline():
-    """Load docs, chunk them, build/load the vectorstore, and return the compiled graph app."""
-    print(f"\n[1/5] Loading documents from '{DATA_DIR}'...")
-    raw_docs = load_documents(DATA_DIR)
-
-    if not raw_docs:
-        raise RuntimeError(
-            f"No documents found in '{DATA_DIR}'. "
-            f"Add some PDFs/CSV/DOCX/images/TXT files there first."
-        )
-
-    print(f"[2/5] Splitting {len(raw_docs)} document(s) into chunks...")
-    chunks = split_documents(raw_docs)
-
-    print(f"[3/5] Building/loading FAISS vector index for {len(chunks)} chunk(s)...")
-    vectorstore = get_or_build_vectorstore(chunks)
-
-    print("[4/5] Building hybrid retriever (FAISS + BM25)...")
-    retriever = get_hybrid_retriever(chunks, vectorstore)
-
-    print("[5/5] Compiling LangGraph RAG flow...")
-    app = build_graph(retriever)
-
-    print("\nPipeline ready.\n")
-    return app
+from ui.tui import run_tui
 
 
 def main():
-    app = build_pipeline()
+    parser = argparse.ArgumentParser(
+        description="⚡ Hybrid RAG — Dense + Sparse AI Retrieval Engine (TUI & CLI)"
+    )
+    parser.add_argument(
+        "-q", "--query",
+        type=str,
+        default=None,
+        help="Run a single question non-interactively and print the answer."
+    )
+    parser.add_argument(
+        "--telemetry",
+        action="store_true",
+        help="Enable detailed Reciprocal Rank Fusion (RRF) candidate telemetry."
+    )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Force re-parsing documents in ./data and rebuild FAISS index."
+    )
 
-    print("Ask a question about your documents (or type 'exit' to quit).\n")
+    args = parser.parse_args()
 
-    while True:
-        question = input("Question: ").strip()
-        if question.lower() in ("exit", "quit"):
-            break
-        if not question:
-            continue
-
-        result = run_query(app, question)
-        answer = result["answer"] if isinstance(result, dict) else result
-
-        print(f"\nAnswer:\n{answer}\n")
-        if isinstance(result, dict):
-            print(f"  Confidence: {'relevant' if result.get('is_relevant') else 'low'}")
-            print(f"  Time: {result.get('timing_s', '?')}s")
-            print(f"  Sources: {len(result.get('documents', []))} chunk(s)")
-        print("-" * 60 + "\n")
+    try:
+        run_tui(
+            force_rebuild=args.rebuild,
+            telemetry_default=args.telemetry,
+            single_query=args.query,
+        )
+    except KeyboardInterrupt:
+        print("\nSession interrupted. Exiting.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

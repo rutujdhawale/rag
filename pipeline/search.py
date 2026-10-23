@@ -24,6 +24,7 @@ Usage:
 
 import os
 import logging
+from pathlib import Path
 from typing import List, Optional
 
 from dotenv import load_dotenv
@@ -164,6 +165,177 @@ def search(
     results = hybrid_retriever.invoke(query)
     logger.info(f"Hybrid search returned {len(results)} result(s).")
     return results
+
+
+def detailed_hybrid_retrieve(
+    query: str,
+    vectorstore: FAISS,
+    bm25_retriever: BM25Retriever,
+    semantic_weight: float = DEFAULT_SEMANTIC_WEIGHT,
+    keyword_weight: float = DEFAULT_KEYWORD_WEIGHT,
+    top_k: int = DEFAULT_TOP_K,
+    rrf_k: int = 60,
+) -> tuple[List[Document], dict]:
+    """
+    Perform hybrid retrieval with explicit telemetry for transparency.
+    Executes dense vector search and sparse BM25 search, computes weighted
+    Reciprocal Rank Fusion (RRF), deduplicates chunks, and returns both
+    the final selected documents and detailed inspection telemetry.
+
+    Returns:
+        (final_docs, telemetry_dict)
+    """
+    logger.info(f"Running detailed hybrid search: query='{query}', top_k={top_k}")
+
+    # 1. Dense retrieval (Vector)
+    vector_results = []
+    try:
+        # Try similarity_search_with_score (FAISS L2 distance: lower is closer)
+        docs_and_scores = vectorstore.similarity_search_with_score(query, k=top_k)
+        for rank, (doc, dist) in enumerate(docs_and_scores, start=1):
+            # Convert L2 distance to an approximate 0-1 similarity score
+            sim_score = round(1.0 / (1.0 + float(dist)), 4)
+            doc_copy = Document(page_content=doc.page_content, metadata={**doc.metadata})
+            doc_copy.metadata["retrieval_method"] = "vector"
+            doc_copy.metadata["vector_rank"] = rank
+            doc_copy.metadata["vector_score"] = sim_score
+            vector_results.append(doc_copy)
+    except Exception as e:
+        logger.warning(f"Vector search with score failed ({e}), falling back to standard search.")
+        raw_docs = vectorstore.similarity_search(query, k=top_k)
+        for rank, doc in enumerate(raw_docs, start=1):
+            doc_copy = Document(page_content=doc.page_content, metadata={**doc.metadata})
+            doc_copy.metadata["retrieval_method"] = "vector"
+            doc_copy.metadata["vector_rank"] = rank
+            vector_results.append(doc_copy)
+
+    # 2. Sparse retrieval (BM25)
+    bm25_results = []
+    try:
+        raw_bm25 = bm25_retriever.invoke(query)
+        for rank, doc in enumerate(raw_bm25[:top_k], start=1):
+            doc_copy = Document(page_content=doc.page_content, metadata={**doc.metadata})
+            doc_copy.metadata["retrieval_method"] = "bm25"
+            doc_copy.metadata["bm25_rank"] = rank
+            bm25_results.append(doc_copy)
+    except Exception as e:
+        logger.warning(f"BM25 search failed: {e}")
+
+    # 3. Weighted Reciprocal Rank Fusion (RRF)
+    # Deduplicate by (source, chunk_index) or trimmed page_content
+    fused_scores: dict[str, float] = {}
+    doc_registry: dict[str, Document] = {}
+    membership: dict[str, dict] = {}
+
+    def get_doc_key(doc: Document) -> str:
+        source = doc.metadata.get("source", "")
+        chunk_idx = doc.metadata.get("chunk_index")
+        if source and chunk_idx is not None:
+            return f"{source}::{chunk_idx}"
+        return doc.page_content[:120].strip()
+
+    # Process vector hits
+    for rank, doc in enumerate(vector_results, start=1):
+        key = get_doc_key(doc)
+        rrf_contrib = semantic_weight / (rrf_k + rank)
+        fused_scores[key] = fused_scores.get(key, 0.0) + rrf_contrib
+        if key not in doc_registry:
+            doc_registry[key] = doc
+        membership[key] = membership.get(key, {})
+        membership[key]["in_vector"] = True
+        membership[key]["vector_rank"] = rank
+        membership[key]["vector_score"] = doc.metadata.get("vector_score")
+
+    # Process BM25 hits
+    for rank, doc in enumerate(bm25_results, start=1):
+        key = get_doc_key(doc)
+        rrf_contrib = keyword_weight / (rrf_k + rank)
+        fused_scores[key] = fused_scores.get(key, 0.0) + rrf_contrib
+        if key not in doc_registry:
+            doc_registry[key] = doc
+        membership[key] = membership.get(key, {})
+        membership[key]["in_bm25"] = True
+        membership[key]["bm25_rank"] = rank
+
+    # Sort merged results by fused score desc
+    sorted_keys = sorted(fused_scores.keys(), key=lambda k: fused_scores[k], reverse=True)
+
+    final_docs: List[Document] = []
+    fused_telemetry: list[dict] = []
+
+    for key in sorted_keys:
+        base_doc = doc_registry[key]
+        m = membership[key]
+        score = round(fused_scores[key], 6)
+
+        # Annotate doc metadata with hybrid provenance
+        merged_doc = Document(
+            page_content=base_doc.page_content,
+            metadata={
+                **base_doc.metadata,
+                "rrf_score": score,
+                "in_vector": m.get("in_vector", False),
+                "in_bm25": m.get("in_bm25", False),
+                "vector_rank": m.get("vector_rank"),
+                "bm25_rank": m.get("bm25_rank"),
+                "vector_score": m.get("vector_score"),
+                "retrieval_method": (
+                    "hybrid_both" if (m.get("in_vector") and m.get("in_bm25"))
+                    else "vector_only" if m.get("in_vector")
+                    else "bm25_only"
+                ),
+            },
+        )
+        if len(final_docs) < top_k:
+            final_docs.append(merged_doc)
+
+        fused_telemetry.append({
+            "key": key,
+            "source": Path(base_doc.metadata.get("source", "unknown")).name,
+            "chunk_index": base_doc.metadata.get("chunk_index", 0),
+            "file_type": base_doc.metadata.get("file_type", "unknown"),
+            "rrf_score": score,
+            "in_vector": m.get("in_vector", False),
+            "in_bm25": m.get("in_bm25", False),
+            "vector_rank": m.get("vector_rank"),
+            "bm25_rank": m.get("bm25_rank"),
+            "preview": base_doc.page_content[:200],
+        })
+
+    telemetry = {
+        "strategy": "Hybrid Dense (FAISS) + Sparse (BM25)",
+        "fusion_algorithm": f"Weighted Reciprocal Rank Fusion (k={rrf_k})",
+        "semantic_weight": semantic_weight,
+        "keyword_weight": keyword_weight,
+        "top_k": top_k,
+        "vector_candidate_count": len(vector_results),
+        "bm25_candidate_count": len(bm25_results),
+        "fused_candidate_count": len(sorted_keys),
+        "final_context_count": len(final_docs),
+        "overlap_count": sum(1 for m in membership.values() if m.get("in_vector") and m.get("in_bm25")),
+        "vector_hits": [
+            {
+                "source": Path(d.metadata.get("source", "unknown")).name,
+                "chunk_index": d.metadata.get("chunk_index", 0),
+                "rank": d.metadata.get("vector_rank"),
+                "score": d.metadata.get("vector_score"),
+                "preview": d.page_content[:180],
+            }
+            for d in vector_results
+        ],
+        "bm25_hits": [
+            {
+                "source": Path(d.metadata.get("source", "unknown")).name,
+                "chunk_index": d.metadata.get("chunk_index", 0),
+                "rank": d.metadata.get("bm25_rank"),
+                "preview": d.page_content[:180],
+            }
+            for d in bm25_results
+        ],
+        "fused_hits": fused_telemetry,
+    }
+
+    return final_docs, telemetry
 
 
 # ---------------------------------------------------------------------------

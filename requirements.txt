@@ -47,3 +47,4 @@ Pillow           # image handling
 python-dotenv
 tiktoken
 numpy
+rich

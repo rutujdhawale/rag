@@ -1,12 +1,8 @@
 # Hybrid RAG — Retrieval-Augmented Generation with Dense + Sparse Search
 
-A self-correcting **Hybrid Retrieval-Augmented Generation** pipeline that combines **FAISS vector search** (semantic understanding) with **BM25 keyword search** (exact matching) to answer questions about your documents — PDFs, DOCX, CSV, Excel and plain text.
+A self-correcting **Hybrid Retrieval-Augmented Generation** pipeline that combines **FAISS vector search** (semantic understanding) with **BM25 keyword search** (exact matching) to answer questions about your documents — PDFs, DOCX, CSV, Excel, images (OCR), and plain text.
 
 Built with **LangChain**, **LangGraph**, **Groq** (free LLM inference), and **HuggingFace** embeddings.
-
-## Demo
-
-[![Watch Demo](assets/thumbnail.png)](https://youtu.be/R3cxfOzA3nI?si=xRNkwlr57ip8sqPB)
 
 ---
 
@@ -86,7 +82,7 @@ graph TD
     K -->|"retry ≤ 2"| H
     K -->|"max retries hit"| L["⚠️ Fallback Answer"]
 
-    J --> M["💬 Final Answer<br/>with source citations"]
+    J --> M[" Final Answer<br/>with source citations"]
 
     style A fill:#4a9eff,color:#fff
     style G fill:#ff6b6b,color:#fff
@@ -96,7 +92,7 @@ graph TD
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 hybrid-rag/
@@ -123,7 +119,7 @@ hybrid-rag/
 
 ---
 
-## ⚙️ How It Works — Step-by-Step Pipeline Deep Dive
+## How It Works — Step-by-Step Pipeline Deep Dive
 
 ### Step 1: Document Ingestion (`data_loader.py`)
 
@@ -580,13 +576,88 @@ GROQ_TEMPERATURE=0.2
 
 ## ▶ Running the Project
 
-```bash
-# 1. Add your documents to the data/ folder
-#    Supported: PDF, DOCX, CSV, Excel, TXT, PNG/JPG (OCR)
+### Option 1: Streamlit Web Application (Recommended)
 
-# 2. Run the pipeline
-python main.py
+Launch the full modern product UI with grouped chat history, document management, transparent hybrid retrieval details, and streaming responses:
+
+```bash
+streamlit run app.py
 ```
+*(or via uv: `uv run streamlit run app.py`)*
+
+Then open **http://localhost:8501** in your browser.
+
+#### Web Interface Highlights:
+- **Chat View**: Clean typography-driven conversation interface with real-time token streaming and citation source cards.
+- **Hybrid Inspection**: Expandable "Why this answer?" breakdown showing exact vector vs BM25 hits, RRF fusion scores, and retrieval latency.
+- **Document Library**: Multi-format file uploader with real sequential progress tracking (Validating → Extracting → Chunking → FAISS Indexing → BM25 Indexing), document deletion, and index rebuilding.
+- **Persistent History**: Conversations grouped into *Today*, *Yesterday*, *Previous 7 Days*, and *Older* with automatic query titling, manual rename, and delete actions.
+- ** Config Panel**: Adjust semantic vs keyword weights, Top-K, model providers (OpenRouter / Groq), and LangGraph self-correction.
+
+---
+
+### Option 2: Interactive Terminal CLI
+
+### Terminal User Interface (TUI)
+
+<p align="center">
+  <img src="assets/tui-demo.png" alt="Hybrid RAG Terminal User Interface" width="100%">
+</p>
+
+The terminal runner (`main.py`) provides an ergonomic, fast, keyboard-first **Terminal User Interface (TUI)** built with Rich:
+
+- **Sub-Second Instant Boot**: Reuses disk-cached FAISS vectors and BM25 chunk pickles directly (< 0.2s startup).
+- **Real-Time Token Streaming**: Streams generated tokens progressively with live Markdown rendering.
+- **Hybrid Retrieval Telemetry**: Live breakdown table showing Dense (FAISS) rank, Sparse (BM25) rank, RRF score, and provenance.
+- **Grounding Citations**: Clean source badges with document names, page numbers, and preview snippets.
+
+#### Launch Interactive TUI
+```bash
+python main.py
+# or with uv:
+uv run python main.py
+```
+
+#### Command Palette Inside TUI
+| Command | Action | Example |
+|---|---|---|
+| `/help` | Display command cheat-sheet and shortcuts | `/help` |
+| `/telemetry` | Toggle detailed RRF candidate ranking table | `/telemetry` |
+| `/sources` | Inspect full text snippets & metadata for last query | `/sources` |
+| `/mode` | Toggle between Fast Streaming & LangGraph Self-Correction | `/mode` |
+| `/weight <w>` | Adjust semantic vs keyword fusion weight | `/weight 0.7` |
+| `/topk <k>` | Change number of retrieved context chunks | `/topk 5` |
+| `/stats` | View document catalog, chunk counts & word distribution | `/stats` |
+| `/rebuild` | Force re-parse documents and re-index FAISS | `/rebuild` |
+| `/clear` | Clear terminal screen and redraw status header | `/clear` |
+| `/exit`, `/quit` | Exit the TUI session cleanly | `/exit` |
+
+#### Non-Interactive CLI Query (Headless Scripting)
+```bash
+# Direct terminal answer with citations:
+python main.py --query "What is the Sherman Antitrust Act?"
+
+# Direct terminal answer with RRF telemetry table:
+python main.py --query "What is the Sherman Antitrust Act?" --telemetry
+```
+
+---
+
+###  Running Tests & Benchmark Evaluation
+
+#### Run Test Suite (18 Automated Tests)
+```bash
+pytest -v
+```
+*(or via uv: `uv run pytest -v`)*
+
+#### Run Retrieval Benchmark Evaluation
+Compare Dense (Vector) vs Sparse (BM25) vs Hybrid (RRF Fusion) on representative queries:
+```bash
+python -m evaluation.eval_retrieval
+```
+
+---
 
 ### What Happens on First Run
 

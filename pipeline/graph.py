@@ -30,15 +30,23 @@ Usage:
 """
 
 import os
+import sys
 import logging
 from typing import List, TypedDict, Optional
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
 
-from pipeline.llm import get_llm, generate_answer
+from pipeline.llm import get_llm, generate_answer, call_llm_with_fallback
 
 load_dotenv()
 
@@ -83,6 +91,8 @@ Retrieved chunks:
 {context}
 
 Are these chunks relevant enough to answer the question, at least partially?
+If the chunks contain keywords, concepts, summaries, or topics related to the question, respond "yes".
+Only respond "no" if the chunks are completely and totally off-topic.
 Respond with ONLY one word: "yes" or "no". No explanation, no punctuation."""
 
 REWRITE_PROMPT_TEMPLATE = """The following search query did not retrieve relevant results from a document knowledge base.
@@ -97,7 +107,7 @@ def _format_context(documents: List[Document]) -> str:
     if not documents:
         return "(no chunks retrieved)"
     return "\n\n".join(
-        f"[Chunk {i+1}] {doc.page_content[:500]}" for i, doc in enumerate(documents)
+        f"[Chunk {i+1}] {doc.page_content[:1000]}" for i, doc in enumerate(documents)
     )
 
 
@@ -111,16 +121,18 @@ def make_retrieve_node(hybrid_retriever):
         logger.info(f"[retrieve] Query: '{state['question']}'")
         docs = hybrid_retriever.invoke(state["question"])
         logger.info(f"[retrieve] Got {len(docs)} chunk(s).")
+        # Keep previous documents if new retrieval returns empty
+        existing = state.get("documents", [])
+        if not docs and existing:
+            docs = existing
         return {**state, "documents": docs}
 
     return retrieve
 
 
 def make_grade_node():
-    """Closure so the grade node builds its LLM once, not per-call."""
-    llm = get_llm()
+    """Closure so the grade node assesses relevance with fallback protection."""
     prompt = ChatPromptTemplate.from_template(GRADE_PROMPT_TEMPLATE)
-    chain = prompt | llm
 
     def grade_relevance(state: GraphState) -> GraphState:
         context = _format_context(state["documents"])
@@ -130,10 +142,20 @@ def make_grade_node():
             return {**state, "is_relevant": False}
 
         logger.info("[grade] Grading retrieved chunks for relevance...")
-        response = chain.invoke({"question": state["question"], "context": context})
-        verdict = response.content.strip().lower()
+        try:
+            content = call_llm_with_fallback(prompt, {"question": state["question"], "context": context})
+            verdict = str(content).strip().lower()
+        except Exception as e:
+            logger.warning(f"[grade] Grading LLM call failed ({e}) — defaulting to relevant.")
+            verdict = "yes"
 
-        is_relevant = verdict.startswith("yes")
+        # Lenient relevance check: only mark not relevant if explicitly 'no' or 'not relevant'
+        verdict_clean = verdict.strip().lower()
+        if verdict_clean in ("no", "no.", "not relevant") or verdict_clean.startswith("no\n"):
+            is_relevant = False
+        else:
+            is_relevant = True
+
         logger.info(f"[grade] Verdict: {verdict} -> is_relevant={is_relevant}")
 
         return {**state, "is_relevant": is_relevant}
@@ -142,15 +164,22 @@ def make_grade_node():
 
 
 def make_rewrite_node():
-    """Closure so the rewrite node builds its LLM once, not per-call."""
-    llm = get_llm()
+    """Closure so the rewrite node rewrites query with fallback protection."""
     prompt = ChatPromptTemplate.from_template(REWRITE_PROMPT_TEMPLATE)
-    chain = prompt | llm
 
     def rewrite_query(state: GraphState) -> GraphState:
         logger.info(f"[rewrite] Rewriting query: '{state['question']}'")
-        response = chain.invoke({"question": state["question"]})
-        new_question = response.content.strip()
+        try:
+            content = call_llm_with_fallback(prompt, {"question": state["question"]})
+            new_question = str(content).strip().strip('"').strip("'")
+            # Strip common conversational LLM prefixes
+            for prefix in ("rewritten query:", "search query:", "query:", "here is the rewritten query:"):
+                if new_question.lower().startswith(prefix):
+                    new_question = new_question[len(prefix):].strip().strip('"').strip("'")
+        except Exception as e:
+            logger.warning(f"[rewrite] Query rewrite failed ({e}) — keeping current query.")
+            new_question = state["question"]
+
         logger.info(f"[rewrite] Rewritten query: '{new_question}'")
 
         return {
@@ -163,19 +192,16 @@ def make_rewrite_node():
 
 
 def make_generate_node():
-    """Closure so the generate node builds its LLM once, not per-call."""
-    llm = get_llm()
-
+    """Closure for final generation node with automatic fallback."""
     def generate(state: GraphState) -> GraphState:
-        if not state["is_relevant"]:
-            logger.info("[generate] Max retries hit with no relevant docs — using fallback answer.")
+        if not state.get("documents"):
+            logger.info("[generate] No documents found — using fallback answer.")
             return {**state, "answer": FALLBACK_ANSWER}
 
-        logger.info("[generate] Generating final answer from relevant context...")
+        logger.info("[generate] Generating answer from retrieved context...")
         answer = generate_answer(
             question=state["original_question"],
             retrieved_docs=state["documents"],
-            llm=llm,
         )
         return {**state, "answer": answer}
 
